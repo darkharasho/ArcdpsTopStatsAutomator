@@ -430,6 +430,11 @@ def generate_aggregate():
         # Extract .json.gz files to .json in a new subfolder
         processed_folder = os.path.join(temp_dir, "ProcessedLogs")
         os.makedirs(processed_folder, exist_ok=True)
+
+        # Ensure the folder is writable
+        import stat
+        os.chmod(processed_folder, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+
         try:
             for file in os.listdir(temp_dir):
                 file_path = os.path.join(temp_dir, file)
@@ -448,9 +453,14 @@ def generate_aggregate():
         # Run the Python script
         try:
             python_script = os.path.join(config.get("top_stats_path", ""), "tw5_top_stats.py")
-            command = ["python", python_script, "-i", processed_folder]
+            processed_folder_path = os.path.abspath(processed_folder)
+
+            # Properly escape the paths by wrapping them in quotes
+            command = ["python", f'"{python_script}"', "-i", f'"{processed_folder_path}"']
             update_terminal_output(f"Running Python script: {' '.join(command)}")
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            # Run the command
+            result = subprocess.run(" ".join(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
             update_terminal_output(result.stdout.strip())
             if result.returncode != 0:
                 update_terminal_output(f"Error: {result.stderr.strip()}")
