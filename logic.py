@@ -1,17 +1,61 @@
-import os  # Fix added
+import os
+from utils import (
+    load_config,
+    save_config,
+    log_progress,
+    scan_and_move_files,
+    clear_folder,
+    run_batch_script,
+    organize_tid_files,
+    ensure_folder_exists,
+)
+
 from datetime import datetime
-from utils import log_progress, execute_batch_command
+from tkinter import Toplevel, Text, Scrollbar, messagebox
 
-def run_tasks(root, arc_dps_logs_var, gw2ei_var, top_stats_var):
-    # Get variables
-    arc_dps_logs = arc_dps_logs_var.get()
-    gw2ei_path = gw2ei_var.get()
-    top_stats_path = top_stats_var.get()
+def run_tasks(
+    root,
+    arc_dps_logs_var,
+    gw2ei_var,
+    top_stats_var,
+    start_date_var,
+    start_hour_spin,
+    start_minute_spin,
+    start_second_spin,
+    stop_date_var,
+    stop_hour_spin,
+    stop_minute_spin,
+    stop_second_spin,
+):
+    """Run tasks and save all configuration values."""
+    # Load and save configuration
+    config = load_config()
+    config["arc_dps_logs"] = arc_dps_logs_var.get()
+    config["gw2ei_path"] = gw2ei_var.get()
+    config["top_stats_path"] = top_stats_var.get()
+    config["start_date"] = start_date_var.get()
+    config["start_time"] = f"{start_hour_spin.get()}:{start_minute_spin.get()}:{start_second_spin.get()}"
+    config["stop_date"] = stop_date_var.get()
+    config["stop_time"] = f"{stop_hour_spin.get()}:{stop_minute_spin.get()}:{stop_second_spin.get()}"
+    save_config(config)
 
-    # Validate inputs
-    if not arc_dps_logs or not gw2ei_path or not top_stats_path:
-        messagebox.showerror("Error", "Please ensure all required paths are selected.")
-        return
+    # Prepare paths and times
+    source_folder = config["arc_dps_logs"]
+    target_folder = os.path.join(
+        os.path.dirname(source_folder), "arcdps.ei_logs", "processed_logs"
+    )
+    ensure_folder_exists(target_folder)
+
+    batch_path = os.path.join(config["top_stats_path"], "TW5_parsing_arc_top_stats.bat")
+    gw2ei_path = config["gw2ei_path"]
+    top_stats_path = config["top_stats_path"]
+
+    start_datetime = datetime.strptime(
+        f"{config['start_date']} {config['start_time']}", "%Y-%m-%d %H:%M:%S"
+    )
+    stop_datetime = datetime.strptime(
+        f"{config['stop_date']} {config['stop_time']}", "%Y-%m-%d %H:%M:%S"
+    )
 
     # Create progress window
     progress_window = Toplevel(root)
@@ -24,25 +68,21 @@ def run_tasks(root, arc_dps_logs_var, gw2ei_var, top_stats_var):
     scroll.pack(side="right", fill="y")
 
     try:
-        # Example: File processing logic
-        log_progress(progress_text, "Starting task...")
-        target_folder = os.path.join(arc_dps_logs, "processed_logs")
-        os.makedirs(target_folder, exist_ok=True)
+        # Task steps
+        log_progress(progress_text, "Clearing target folder...")
+        clear_folder(target_folder)
 
-        # Process files (add your file processing logic here)
-        for file in os.listdir(arc_dps_logs):
-            if file.endswith(".log"):
-                shutil.copy(os.path.join(arc_dps_logs, file), target_folder)
-                log_progress(progress_text, f"Copied: {file}")
+        log_progress(progress_text, "Scanning and moving files...")
+        scan_and_move_files(source_folder, target_folder, start_datetime, stop_datetime)
 
-        # Run batch command
-        execute_batch_command(progress_text, target_folder, gw2ei_path, top_stats_path)
+        log_progress(progress_text, "Running batch script...")
+        run_batch_script(batch_path, target_folder, gw2ei_path, top_stats_path)
 
-        # Open the folder with tid files
-        tid_folder = os.path.join(target_folder, "tid_files")
-        os.makedirs(tid_folder, exist_ok=True)
-        os.system(f'explorer "{tid_folder}"')
-        log_progress(progress_text, "Opened tid files folder.")
+        log_progress(progress_text, "Organizing .tid files...")
+        organize_tid_files(target_folder)
+
+        log_progress(progress_text, "Tasks completed successfully!")
 
     except Exception as e:
         log_progress(progress_text, f"Error: {str(e)}")
+        messagebox.showerror("Error", f"An error occurred: {str(e)}")
