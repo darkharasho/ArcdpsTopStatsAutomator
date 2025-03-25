@@ -3,6 +3,12 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from datetime import datetime
 import json
+import shutil
+import tempfile
+from tkinter import Toplevel, Label, ttk, messagebox
+import subprocess
+import threading
+import gzip
 
 CONFIG_FILE = "config.json"
 
@@ -66,17 +72,26 @@ def select_files_after_date():
         print("Invalid date format. Use YYYY-MM-DD HH:MM")
 
 def select_if_modified_after(item, cutoff):
-    values = tree.item(item, "values")
-    full_path = os.path.normpath(values[0]) if values else None  # Get the full path from the Treeview
+    tags = tree.item(item, "tags")
+    if not tags or tags[0] == "folder":  # Skip folders or items without valid tags
+        for child in tree.get_children(item):
+            select_if_modified_after(child, cutoff)
+        return
+
+    full_path = tags[0]  # Retrieve the full path from the tags
 
     if full_path and os.path.isfile(full_path) and full_path.lower().endswith(".zevtc"):
         try:
             mod_time = datetime.fromtimestamp(os.path.getmtime(full_path))
             if mod_time > cutoff:
-                checked_items[full_path] = True
-                tree.item(item, text="✅ " + os.path.basename(full_path))
+                # Only update if the file is not already selected
+                if full_path not in checked_items:
+                    checked_items[full_path] = True
+                    tree.item(item, text="✅ " + os.path.basename(full_path), tags=(full_path,))  # Update tags
         except Exception as e:
             print(f"Error checking file: {e}")
+
+    # Recursively process child items
     for child in tree.get_children(item):
         select_if_modified_after(child, cutoff)
 
@@ -143,9 +158,10 @@ tree_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
 # Treeview with checkboxes for file selection
 tree = ttk.Treeview(tree_frame, columns=("modified",), selectmode="extended")
-tree.heading("#0", text="File/Folder")
-tree.heading("modified", text="Last Modified")
-tree.column("modified", width=150)
+tree.heading("#0", text="File/Folder")  # Main column for file/folder names
+tree.heading("modified", text="Last Modified")  # Secondary column for last modified date
+tree.column("#0", width=400)  # Adjust width for file/folder names
+tree.column("modified", width=150, anchor="center")  # Adjust width and alignment for last modified date
 tree.grid(row=0, column=0, sticky="nsew")
 
 tree_frame.rowconfigure(0, weight=1)
@@ -206,16 +222,21 @@ def update_selected_list():
 
     count_label.config(text=f"{count} file(s) selected")
 
-    for item in tree.get_children(""):
+    for item in tree.get_children(""):  # Apply highlights to all items
         apply_tree_highlight(item)
 
 def apply_tree_highlight(item):
-    name = tree.item(item, "text").replace("✅ ", "")
-    full_path = os.path.join(root_path, name)
+    tags = tree.item(item, "tags")
+    if not tags or tags[0] == "folder":  # Skip folders
+        for child in tree.get_children(item):
+            apply_tree_highlight(child)
+        return
+
+    full_path = tags[0]  # Retrieve the full path from the tags
     if full_path in checked_items:
-        tree.item(item, tags=("selected",))
+        tree.item(item, text="✅ " + os.path.basename(full_path), tags=(full_path,))
     else:
-        tree.item(item, tags=())
+        tree.item(item, text=os.path.basename(full_path), tags=(full_path,))
     for child in tree.get_children(item):
         apply_tree_highlight(child)
 
@@ -229,41 +250,57 @@ def on_tree_click(event):
     if not item_id:
         return
 
-    values = tree.item(item_id, "values")
-    if not values or not values[0].lower().endswith(".zevtc"):
+    tags = tree.item(item_id, "tags")
+    if not tags or tags[0] == "folder":  # Skip folders or items without valid tags
         return
 
-    full_path = os.path.normpath(values[0])  # Normalize the path
+    full_path = tags[0]  # Retrieve the full path from the tags
 
+    # Check if Shift key is pressed
     if event.state & 0x0001 and last_selected:
-        items = tree.get_children("")
+        # Get all items in the tree
         all_items = []
-        def collect_items(i):
-            all_items.append(i)
-            for c in tree.get_children(i):
-                collect_items(c)
-        for i in items:
-            collect_items(i)
+
+        def collect_items(item):
+            all_items.append(item)
+            for child in tree.get_children(item):
+                collect_items(child)
+
+        for root_item in tree.get_children(""):
+            collect_items(root_item)
 
         try:
-            i1 = all_items.index(last_selected)
-            i2 = all_items.index(item_id)
-            for i in all_items[min(i1, i2):max(i1, i2)+1]:
-                v = tree.item(i, "values")
-                if v and v[0].lower().endswith(".zevtc"):
-                    checked_items[os.path.normpath(v[0])] = True
-                    tree.item(i, text="✅ " + os.path.basename(v[0]))
+            # Find the indices of the last selected item and the current item
+            start_index = all_items.index(last_selected)
+            end_index = all_items.index(item_id)
+
+            # Select all items in the range
+            for i in range(min(start_index, end_index), max(start_index, end_index) + 1):
+                current_item = all_items[i]
+                current_tags = tree.item(current_item, "tags")
+                if current_tags and current_tags[0].lower().endswith(".zevtc"):
+                    current_full_path = current_tags[0]
+                    if current_full_path not in checked_items:
+                        checked_items[current_full_path] = True
+                        tree.item(current_item, text="✅ " + os.path.basename(current_full_path), tags=(current_full_path,))
         except ValueError:
             pass
     else:
-        if full_path in checked_items:
-            del checked_items[full_path]
-            tree.item(item_id, text=os.path.basename(full_path))
-        else:
-            checked_items[full_path] = True
-            tree.item(item_id, text="✅ " + os.path.basename(full_path))
-        last_selected = item_id
+        # Toggle selection for the clicked item
+        if full_path.lower().endswith(".zevtc"):
+            if full_path in checked_items:
+                # Deselect the file
+                del checked_items[full_path]
+                tree.item(item_id, text=os.path.basename(full_path), tags=(full_path,))  # Reset tags
+            else:
+                # Select the file
+                checked_items[full_path] = True
+                tree.item(item_id, text="✅ " + os.path.basename(full_path), tags=(full_path,))  # Update tags
 
+    # Update the last selected item
+    last_selected = item_id
+
+    # Update the selected listbox and count
     update_selected_list()
 
 def on_listbox_double_click(event):
@@ -295,12 +332,15 @@ def populate_tree(parent, path):
             full_path = os.path.normpath(full_path)  # Normalize the full path
             if os.path.isdir(full_path):
                 # Insert folder into the tree and recursively populate its children
-                node = tree.insert(parent, "end", text=entry, values=(full_path,))  # Store full path for folders
+                node = tree.insert(parent, "end", text=entry, values=(""))  # No date for folders
+                tree.item(node, tags=("folder",))  # Set a placeholder tag for folders
                 populate_tree(node, full_path)
             elif entry.lower().endswith(".zevtc"):
-                # Insert file into the tree with its full path and modification time
-                mod_time = datetime.fromtimestamp(os.path.getmtime(full_path)).strftime("%Y-%m-%d %H:%M")
-                tree.insert(parent, "end", text=entry, values=(full_path, mod_time))  # Store full path for files
+                # Get the last modified time of the file
+                mod_time = datetime.fromtimestamp(os.path.getmtime(full_path)).strftime("%Y-%m-%d %H:%M:%S")
+                # Insert file into the tree with its last modified date
+                node = tree.insert(parent, "end", text=entry, values=(mod_time,))  # Only display the date
+                tree.item(node, tags=(full_path,))  # Store the full path in the tags
     except Exception as e:
         print(f"Error reading directory {path}: {e}")
 
@@ -309,5 +349,140 @@ if os.path.exists(root_path):
 
 tree.bind("<Button-1>", on_tree_click)
 selected_listbox.bind("<Double-Button-1>", on_listbox_double_click)
+
+def generate_aggregate():
+    if not checked_items:
+        # Show an error popup if no files are selected
+        messagebox.showerror("No Files Selected", "Please select at least one file to generate the aggregate.")
+        return
+
+    # Create a temporary folder
+    temp_dir = tempfile.mkdtemp()
+    print(f"Temporary folder created: {temp_dir}")
+
+    # Create a popup window for progress
+    progress_popup = Toplevel(root)
+    progress_popup.title("")  # Remove the title text
+    progress_popup.geometry("600x400")  # Adjust the size to look like a terminal
+    progress_popup.resizable(False, False)  # Disable resizing
+
+    # Terminal-like output using a Text widget
+    terminal_output = tk.Text(progress_popup, height=25, width=80, state="disabled", bg="black", fg="white", font=("Courier", 10), borderwidth=0)
+    terminal_output.pack(fill="both", expand=True)  # Fill the entire popup window
+
+    def update_terminal_output(message):
+        terminal_output.config(state="normal")
+        terminal_output.insert(tk.END, message + "\n")
+        terminal_output.see(tk.END)  # Scroll to the bottom
+        terminal_output.config(state="disabled")
+
+    def process_files():
+        # Copy files with progress
+        total_files = len(checked_items)
+        update_terminal_output(f"Copying {total_files} selected files to temporary folder...")
+        for i, full_path in enumerate(checked_items.keys(), start=1):
+            try:
+                shutil.copy(full_path, temp_dir)
+                progress = int((i / total_files) * 50)  # ASCII progress bar length
+                progress_bar = "[" + "#" * progress + "-" * (50 - progress) + "]"
+                update_terminal_output(f"{progress_bar} {i}/{total_files} - Copied: {os.path.basename(full_path)}")
+            except Exception as e:
+                update_terminal_output(f"Error copying file {full_path}: {e}")
+
+        # Locate the Elite Insights executable
+        ei_exec = None
+        elite_insights_path = config.get("elite_insights_path", "")
+        if os.path.exists(os.path.join(elite_insights_path, "GuildWars2EliteInsights.exe")):
+            ei_exec = os.path.join(elite_insights_path, "GuildWars2EliteInsights.exe")
+        elif os.path.exists(os.path.join(elite_insights_path, "GuildWars2EliteInsights-CLI.exe")):
+            ei_exec = os.path.join(elite_insights_path, "GuildWars2EliteInsights-CLI.exe")
+        else:
+            update_terminal_output("No valid Guild Wars 2 Elite Insights executable found.")
+            return
+
+        # Use the configuration template from the root of the project directory
+        template_conf_file = os.path.join(os.getcwd(), "EliteInsightsConfigTemplate.conf")
+        edited_conf_file = os.path.join(temp_dir, "EliteInsightConfig.conf")
+
+        if not os.path.exists(template_conf_file):
+            update_terminal_output(f"Configuration template file not found: {template_conf_file}")
+            return
+
+        # Edit the .conf file to set OutLocation to the temporary folder
+        edit_conf_file(template_conf_file, edited_conf_file, temp_dir)
+
+        # Process .zevtc files using Elite Insights
+        try:
+            update_terminal_output("Processing .zevtc files with Elite Insights...")
+            zevtc_files = [file for file in os.listdir(temp_dir) if file.lower().endswith(".zevtc")]
+            for i, file in enumerate(zevtc_files, start=1):
+                file_path = os.path.join(temp_dir, file)
+                command = [ei_exec, "-c", edited_conf_file, file_path]
+                update_terminal_output(f"[{i}/{len(zevtc_files)}] Processing: {file}")
+                result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                update_terminal_output(result.stdout.strip())
+                if result.returncode != 0:
+                    update_terminal_output(f"Error: {result.stderr.strip()}")
+        except Exception as e:
+            update_terminal_output(f"Error processing files with Elite Insights: {e}")
+            return
+
+        # Extract .json.gz files to .json in a new subfolder
+        processed_folder = os.path.join(temp_dir, "ProcessedLogs")
+        os.makedirs(processed_folder, exist_ok=True)
+        try:
+            for file in os.listdir(temp_dir):
+                file_path = os.path.join(temp_dir, file)
+                if os.path.isfile(file_path) and file.lower().endswith(".json.gz"):
+                    # Extract the .json.gz file
+                    extracted_file_path = os.path.join(processed_folder, os.path.splitext(file)[0])  # Remove .gz extension
+                    with gzip.open(file_path, "rb") as gz_file:
+                        with open(extracted_file_path, "wb") as json_file:
+                            shutil.copyfileobj(gz_file, json_file)
+                    update_terminal_output(f"Extracted: {file} -> {extracted_file_path}")
+            update_terminal_output(f"All .json.gz files have been extracted to: {processed_folder}")
+        except Exception as e:
+            update_terminal_output(f"Error extracting .json.gz files: {e}")
+            return
+
+        # Run the Python script
+        try:
+            python_script = os.path.join(config.get("top_stats_path", ""), "tw5_top_stats.py")
+            command = ["python", python_script, "-i", processed_folder]
+            update_terminal_output(f"Running Python script: {' '.join(command)}")
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            update_terminal_output(result.stdout.strip())
+            if result.returncode != 0:
+                update_terminal_output(f"Error: {result.stderr.strip()}")
+                return
+            update_terminal_output("Python script completed successfully.")
+        except Exception as e:
+            update_terminal_output(f"Error running Python script: {e}")
+            return
+
+        # Close the popup after completion
+        update_terminal_output("Processing complete!")
+
+    # Run the file processing in a separate thread
+    threading.Thread(target=process_files).start()
+
+def edit_conf_file(template_path, output_path, temp_dir):
+    try:
+        with open(template_path, "r") as template_file:
+            lines = template_file.readlines()
+
+        # Modify the OutLocation line
+        with open(output_path, "w") as output_file:
+            for line in lines:
+                if line.startswith("OutLocation="):
+                    output_file.write(f"OutLocation={temp_dir}\n")
+                else:
+                    output_file.write(line)
+    except Exception as e:
+        print(f"Error editing .conf file: {e}")
+
+# Add "Generate Aggregate" button at the bottom right
+generate_button = ttk.Button(root, text="Generate Aggregate", command=generate_aggregate)
+generate_button.pack(side="bottom", anchor="se", padx=10, pady=10)
 
 root.mainloop()
